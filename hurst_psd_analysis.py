@@ -133,6 +133,44 @@ def compute_rq_from_psd(
     return float(math.sqrt(rq_sq))
 
 
+def compute_rms_slope_from_psd(
+    q: np.ndarray,
+    psd: np.ndarray,
+    q_max: float = RQ_INTEGRATION_Q_MAX,
+) -> float:
+    """
+    Compute RMS slope m_rms from a 1D PSD using
+
+        m_rms^2 = (1 / pi) * ∫ q^2 C(q) dq   over  0 <= q <= q_max
+
+    and return m_rms = sqrt(m_rms^2).
+
+    Parameters
+    ----------
+    q : array-like
+        Wavevector values in nm^-1.
+    psd : array-like
+        PSD values in nm^3.
+    q_max : float
+        Upper integration limit in nm^-1.
+    """
+    q = np.asarray(q, dtype=float)
+    psd = np.asarray(psd, dtype=float)
+
+    mask = np.isfinite(q) & np.isfinite(psd) & (psd >= 0.0) & (q <= q_max)
+    q_sel = q[mask]
+    psd_sel = psd[mask]
+
+    if q_sel.size < 2:
+        return float("nan")
+
+    integrand = (q_sel ** 2) * psd_sel
+    integral = np.trapz(integrand, q_sel)
+
+    m_sq = abs((1.0 / math.pi) * integral)
+    return float(math.sqrt(m_sq))
+
+
 # ==== PLOTTING =============================================================
 
 def plot_psd_with_fit(
@@ -287,10 +325,11 @@ def plot_psd_with_fit_multi(
     ax.set_title(csv_path.name)
     ax.legend(loc="upper right", fontsize=8)
 
-    # Build table of H, slopes, and Rq (for separate table figure)
+    # Build table of H, slopes, Rq, and m_rms (for separate table figure)
     table_rows = []
     H_values = []
     Rq_values = []
+    m_values = []
     for g in groups:
         table_rows.append(
             [
@@ -298,26 +337,23 @@ def plot_psd_with_fit_multi(
                 f"{g['H']:.4f}",
                 f"{g['slope']:.4f}",
                 f"{g['Rq']:.4f}",
+                f"{g['m_rms']:.4f}",
             ]
         )
         H_values.append(float(g["H"]))
         Rq_values.append(float(g["Rq"]))
+        m_values.append(float(g["m_rms"]))
 
-    if H_values:
-        H_mean = float(np.mean(H_values))
-    else:
-        H_mean = float("nan")
+    H_mean = float(np.mean(H_values)) if H_values else float("nan")
+    Rq_mean = float(np.mean(Rq_values)) if Rq_values else float("nan")
+    m_mean = float(np.mean(m_values)) if m_values else float("nan")
 
-    if Rq_values:
-        Rq_mean = float(np.mean(Rq_values))
-    else:
-        Rq_mean = float("nan")
-
-    # Note mean(H) and mean(Rq) on the main plot
+    # Note mean(H), mean(Rq), and mean(m_rms) on the main plot
     ax.text(
         0.03,
         0.97,
-        f"mean(H) = {H_mean:.4f}\nmean(Rq) = {Rq_mean:.4f} nm",
+        "mean(H) = "
+        f"{H_mean:.4f}\nmean(Rq) = {Rq_mean:.4f} nm\nmean(m_rms) = {m_mean:.4f}",
         transform=ax.transAxes,
         fontsize=9,
         verticalalignment="top",
@@ -332,14 +368,12 @@ def plot_psd_with_fit_multi(
     plt.close(fig)
 
     # Create a separate figure for the table
-    fig_table, ax_table = plt.subplots(
-        figsize=(6.5, 0.6 + 0.35 * len(table_rows))
-    )
+    fig_table, ax_table = plt.subplots(figsize=(7.5, 0.6 + 0.35 * len(table_rows)))
     ax_table.axis("off")
 
     the_table = ax_table.table(
         cellText=table_rows,
-        colLabels=["Series", "H", "slope", "Rq (nm)"],
+        colLabels=["Series", "H", "slope", "Rq (nm)", "m_rms"],
         loc="center",
     )
     the_table.auto_set_font_size(False)
@@ -402,6 +436,7 @@ def analyse_csv_file(
             slope, intercept = fit_loglog_1d_psd(q, psd, fit_range=fit_range)
             H = slope_to_hurst_1d(slope)
             Rq = compute_rq_from_psd(q, psd)
+            m_rms = compute_rms_slope_from_psd(q, psd)
 
             groups_info.append(
                 {
@@ -412,6 +447,7 @@ def analyse_csv_file(
                     "intercept": intercept,
                     "H": H,
                     "Rq": Rq,
+                    "m_rms": m_rms,
                 }
             )
 
@@ -432,13 +468,14 @@ def analyse_csv_file(
             print(
                 f"  {csv_path} | {g['name']}: "
                 f"slope = {g['slope']:.4f}, H = {g['H']:.4f}, "
-                f"Rq = {g['Rq']:.4f} nm"
+                f"Rq = {g['Rq']:.4f} nm, m_rms = {g['m_rms']:.4f}"
             )
 
         slopes = np.array([g["slope"] for g in groups_info], dtype=float)
         intercepts = np.array([g["intercept"] for g in groups_info], dtype=float)
         H_values = np.array([g["H"] for g in groups_info], dtype=float)
         Rq_values = np.array([g["Rq"] for g in groups_info], dtype=float)
+        m_values = np.array([g["m_rms"] for g in groups_info], dtype=float)
 
         slope_mean = float(slopes.mean())
         intercept_mean = float(intercepts.mean())
@@ -446,12 +483,43 @@ def analyse_csv_file(
         H_std = float(H_values.std(ddof=1)) if H_values.size > 1 else 0.0
         Rq_mean = float(Rq_values.mean())
         Rq_std = float(Rq_values.std(ddof=1)) if Rq_values.size > 1 else 0.0
+        m_mean = float(m_values.mean())
+        m_std = float(m_values.std(ddof=1)) if m_values.size > 1 else 0.0
 
         print(
             f"\n{csv_path} summary over {len(groups_info)} series: "
             f"mean(H) = {H_mean:.4f}, std(H) = {H_std:.4f}; "
-            f"mean(Rq) = {Rq_mean:.4f} nm, std(Rq) = {Rq_std:.4f} nm"
+            f"mean(Rq) = {Rq_mean:.4f} nm, std(Rq) = {Rq_std:.4f} nm; "
+            f"mean(m_rms) = {m_mean:.4f}, std(m_rms) = {m_std:.4f}"
         )
+
+        # Save per-series statistics to CSV
+        stats_rows = []
+        for g in groups_info:
+            stats_rows.append(
+                {
+                    "Series": g["name"],
+                    "slope": g["slope"],
+                    "H": g["H"],
+                    "Rq_nm": g["Rq"],
+                    "m_rms": g["m_rms"],
+                }
+            )
+        stats_rows.append(
+            {
+                "Series": "mean",
+                "slope": slope_mean,
+                "H": H_mean,
+                "Rq_nm": Rq_mean,
+                "m_rms": m_mean,
+            }
+        )
+
+        stats_df = pd.DataFrame(stats_rows)
+        stats_path = output_dir / f"{csv_path.stem}_hurst_stats.csv"
+        stats_df.to_csv(stats_path, index=False)
+
+        print(f"Per-series statistics saved to: {stats_path}")
         print(f"Combined plot with table saved to: {img_path}")
 
         return slope_mean, intercept_mean, H_mean
